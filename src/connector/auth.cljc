@@ -14,47 +14,14 @@
   The state parameter is the caller's too. It has to be — it is only worth
   anything if the same process that minted it checks it on the way back, and a
   library cannot do the second half."
-  (:require [clojure.string :as str]))
+  (:require [clojure.string :as str]
+            [connector.uri :as uri]))
 
-;; --- percent-encoding ---
+(def ^{:doc "Alias of `connector.uri/query-string`, kept because a token
+  endpoint body is a query string and callers reach for it here."}
+  query-string uri/query-string)
 
-(defn- encode
-  "RFC 3986 percent-encoding, identical on both hosts.
-
-  Neither platform primitive is RFC 3986 on its own: Java's URLEncoder is
-  form-encoding (space becomes '+', '*' and '~' come out differently) and
-  encodeURIComponent leaves !'()* alone. The rewrites below settle both on the
-  same output, which matters because a signature or a logged consent URL that
-  differs by host is a difference somebody has to chase."
-  [v]
-  (-> #?(:clj (java.net.URLEncoder/encode (str v) "UTF-8")
-         :cljs (js/encodeURIComponent (str v)))
-      (str/replace "+" "%20")
-      (str/replace "*" "%2A")
-      (str/replace "%7E" "~")
-      (str/replace "!" "%21")
-      (str/replace "'" "%27")
-      (str/replace "(" "%28")
-      (str/replace ")" "%29")))
-
-(defn query-string
-  "Encode a map as `a=1&b=2`, sorted by key.
-
-  Sorted so the same parameters always produce the same string. An
-  authorization URL is read by humans in logs and compared against a provider's
-  console; one that reshuffles itself per call cannot be compared to anything."
-  [params]
-  (->> params
-       (remove (fn [[_ v]] (or (nil? v) (and (string? v) (str/blank? v)))))
-       (sort-by (comp str first))
-       (map (fn [[k v]] (str (encode (name k)) "=" (encode v))))
-       (str/join "&")))
-
-(defn- with-query [url params]
-  (let [qs (query-string params)]
-    (if (str/blank? qs)
-      url
-      (str url (if (str/includes? url "?") "&" "?") qs))))
+(def ^:private with-query uri/with-query)
 
 ;; --- PKCE ---
 
