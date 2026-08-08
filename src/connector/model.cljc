@@ -82,7 +82,21 @@
   "An OAuth 2.0 authorization-code auth profile.
 
   opts: {:authorization-endpoint :token-endpoint :client-id-env
-         :client-secret-env :pkce? :base-scopes :extra :profile-endpoint}
+         :client-secret-env :pkce? :base-scopes :extra :profile-endpoint
+         :scopes? :client-auth}
+
+  `:scopes?` defaults to true and is set false by providers whose
+  authorization endpoint has no `scope` parameter at all. Notion is the case
+  that forced it: permissions there are fixed on the integration, so a
+  descriptor that declared per-tool scopes would be describing a mechanism the
+  provider does not have. Declaring it false is not a weaker connector — it is
+  the connector saying that consent cannot be narrowed here, which is exactly
+  what an operator needs to know before enabling it.
+
+  `:client-auth` is `:post` (default, RFC 6749 §2.3.1 client_secret_post) or
+  `:basic` (client_secret_basic, the HTTP Basic header). Notion accepts only
+  the latter, and a token request sent the wrong way fails with an error that
+  says nothing about which of the two is expected.
 
   Only the NAMES of the environment variables holding the client credentials
   are recorded. A descriptor that read them would hold ambient authority and
@@ -98,6 +112,10 @@
            :connector.auth/authorization-endpoint (:authorization-endpoint opts)
            :connector.auth/token-endpoint (:token-endpoint opts)
            :connector.auth/pkce? (boolean (:pkce? opts))}
+    ;; Recorded only when false. The default is the common case, and a key that
+    ;; appears on every descriptor to say "normal" is noise in a grant screen.
+    (false? (:scopes? opts)) (assoc :connector.auth/scopes? false)
+    (= :basic (:client-auth opts)) (assoc :connector.auth/client-auth :basic)
     (:client-id-env opts)     (assoc :connector.auth/client-id-env (:client-id-env opts))
     (:client-secret-env opts) (assoc :connector.auth/client-secret-env (:client-secret-env opts))
     (:profile-endpoint opts)  (assoc :connector.auth/profile-endpoint (:profile-endpoint opts))
@@ -111,10 +129,32 @@
   {:connector.auth/kind :bearer
    :connector.auth/token-env token-env})
 
+(defn url-credential
+  "A profile where the credential IS the endpoint.
+
+  Incoming webhooks work this way — Google Chat, Slack and Discord all hand out
+  a URL carrying its own key in the query string, and there is no header to put
+  anything in. Modelling it as `:bearer` would be wrong twice: the host would
+  send an Authorization header the provider ignores, and the URL, which is the
+  actual secret, would sit in the descriptor where a catalog can print it.
+
+  `connector.invoke` fills the URL in from the host's token for any request
+  carrying `:connector.http/url-from-credential`. So the connector still never
+  holds the credential, and still cannot print it."
+  [url-env]
+  {:connector.auth/kind :url-credential
+   :connector.auth/url-env url-env})
+
 (def anonymous
   "No credential at all. A public API still gets a declared profile so that
   `:connector/auth` is never absent — absent would read as 'not yet written'."
   {:connector.auth/kind :none})
+
+(defn scoped?
+  "Whether this connector's provider has a scope mechanism at all."
+  [descriptor]
+  (and (= :oauth2 (get-in descriptor [:connector/auth :connector.auth/kind]))
+       (not (false? (get-in descriptor [:connector/auth :connector.auth/scopes?])))))
 
 ;; --- queries ---
 

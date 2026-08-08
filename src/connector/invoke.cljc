@@ -17,18 +17,35 @@
   (merge {:connector/error true :connector/code code :connector/message msg} data))
 
 (defn- authorize
-  "Add the Authorization header for `descriptor`, or return an error map."
+  "Attach the credential for `descriptor`, or return an error map.
+
+  Where it goes depends on the profile. For `:oauth2`/`:bearer` it is an
+  Authorization header. For `:url-credential` — an incoming webhook, whose URL
+  carries its own key — there is no header to use and the credential IS the
+  endpoint, so it becomes the URL. Either way the connector's own `request`
+  never saw it."
   [request descriptor token]
-  (let [kind (get-in descriptor [:connector/auth :connector.auth/kind])]
+  (let [kind (get-in descriptor [:connector/auth :connector.auth/kind])
+        missing (error :connector/not-connected
+                       (str (:connector/id descriptor) " has no access token")
+                       {:connector/id (:connector/id descriptor)})]
     (case kind
       :none request
+
       (:oauth2 :bearer)
       (if (seq (str token))
         (assoc-in request [:connector.http/headers "authorization"]
                   (auth/authorization-header token))
-        (error :connector/not-connected
-               (str (:connector/id descriptor) " has no access token")
-               {:connector/id (:connector/id descriptor)}))
+        missing)
+
+      :url-credential
+      (cond
+        (not (:connector.http/url-from-credential request)) request
+        (seq (str token)) (-> request
+                              (assoc :connector.http/url (str token))
+                              (dissoc :connector.http/url-from-credential))
+        :else missing)
+
       request)))
 
 (defn request-for

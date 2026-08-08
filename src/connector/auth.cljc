@@ -85,8 +85,13 @@
                      {"response_type" "code"
                       "client_id" client-id
                       "redirect_uri" redirect-uri
-                      "scope" (str/join " " (sort (distinct scopes)))
                       "state" state})
+        ;; Omitted entirely for providers with no scope mechanism. Sending an
+        ;; empty `scope=` to Notion is not harmless-looking noise — it is the
+        ;; descriptor claiming a narrowing that does not exist.
+        (not (false? (:connector.auth/scopes? auth)))
+        (assoc "scope" (str/join " " (sort (distinct scopes))))
+
         ;; Sent only when the provider verifies it. GitHub's OAuth Apps ignore
         ;; `code_challenge`; including it there would suggest a protection that
         ;; is not in force.
@@ -98,12 +103,36 @@
 
 ;; --- token requests ---
 
-(defn- form-request [url params]
-  {:connector.http/method :post
-   :connector.http/url url
-   :connector.http/headers {"content-type" "application/x-www-form-urlencoded"
-                            "accept" "application/json"}
-   :connector.http/body (query-string params)})
+(defn- base64
+  "Base64 of an ASCII string. OAuth client ids and secrets are ASCII by
+  RFC 6749 §appendix-B, so no UTF-8 handling is needed here — and a client
+  credential that is not ASCII would break the Basic scheme itself."
+  [s]
+  #?(:clj (.encodeToString (java.util.Base64/getEncoder)
+                           (.getBytes (str s) "UTF-8"))
+     :cljs (if (exists? js/Buffer)
+             (.toString (js/Buffer.from (str s) "utf8") "base64")
+             (js/btoa (str s)))))
+
+(defn- form-request
+  "A token-endpoint request. `client-auth` decides whether the secret goes in
+  the body (RFC 6749 client_secret_post) or an HTTP Basic header
+  (client_secret_basic) — Notion accepts only the latter, and a request sent
+  the wrong way fails with an error naming neither."
+  [auth url params client-id client-secret]
+  (let [basic? (and (= :basic (:connector.auth/client-auth auth))
+                    (seq (str client-secret)))]
+    {:connector.http/method :post
+     :connector.http/url url
+     :connector.http/headers
+     (cond-> {"content-type" "application/x-www-form-urlencoded"
+              "accept" "application/json"}
+       basic? (assoc "authorization"
+                     (str "Basic " (base64 (str client-id ":" client-secret)))))
+     :connector.http/body
+     (query-string (cond-> params
+                     (and (seq (str client-secret)) (not basic?))
+                     (assoc "client_secret" client-secret)))}))
 
 (defn token-exchange-request
   "The request that turns an authorization code into tokens.
@@ -114,13 +143,13 @@
   only party that should ever hold the secret."
   [descriptor {:keys [client-id client-secret code redirect-uri code-verifier]}]
   (let [auth (:connector/auth descriptor)]
-    (form-request (:connector.auth/token-endpoint auth)
+    (form-request auth (:connector.auth/token-endpoint auth)
                   (cond-> {"grant_type" "authorization_code"
                            "code" code
                            "client_id" client-id
                            "redirect_uri" redirect-uri}
-                    (seq (str client-secret)) (assoc "client_secret" client-secret)
-                    (:connector.auth/pkce? auth) (assoc "code_verifier" code-verifier)))))
+                    (:connector.auth/pkce? auth) (assoc "code_verifier" code-verifier))
+                  client-id client-secret)))
 
 (defn refresh-request
   "The request that exchanges a refresh token for a fresh access token.
@@ -128,12 +157,14 @@
   opts: {:client-id :client-secret :refresh-token :scopes}"
   [descriptor {:keys [client-id client-secret refresh-token scopes]}]
   (let [auth (:connector/auth descriptor)]
-    (form-request (:connector.auth/token-endpoint auth)
+    (form-request auth (:connector.auth/token-endpoint auth)
                   (cond-> {"grant_type" "refresh_token"
                            "refresh_token" refresh-token
                            "client_id" client-id}
-                    (seq (str client-secret)) (assoc "client_secret" client-secret)
-                    (seq scopes) (assoc "scope" (str/join " " scopes))))))
+                    (and (seq scopes)
+                         (not (false? (:connector.auth/scopes? auth))))
+                    (assoc "scope" (str/join " " scopes)))
+                  client-id client-secret)))
 
 (defn authorization-header
   "The Authorization header value for an access token."

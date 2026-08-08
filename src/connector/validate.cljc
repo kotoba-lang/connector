@@ -19,7 +19,7 @@
   {:connector/severity severity :connector/code code
    :connector/id id :connector/msg msg})
 
-(def ^:private auth-kinds #{:oauth2 :bearer :none})
+(def ^:private auth-kinds #{:oauth2 :bearer :none :url-credential})
 
 (defn- validate-auth [id auth]
   (let [ps (transient [])
@@ -51,7 +51,12 @@
       (= :bearer kind)
       (when (str/blank? (str (:connector.auth/token-env auth)))
         (conj! ps (problem :error :auth/no-token-env id
-                           (str id " bearer profile names no token env var")))))
+                           (str id " bearer profile names no token env var"))))
+
+      (= :url-credential kind)
+      (when (str/blank? (str (:connector.auth/url-env auth)))
+        (conj! ps (problem :error :auth/no-url-env id
+                           (str id " url-credential profile names no url env var")))))
     (persistent! ps)))
 
 (defn- validate-tool [id tool-key tool]
@@ -86,7 +91,11 @@
   [descriptor]
   (let [id (:connector/id descriptor)
         ps (transient [])
-        oauth? (= :oauth2 (get-in descriptor [:connector/auth :connector.auth/kind]))]
+        ;; Per-tool scopes are demanded only where the provider HAS scopes.
+        ;; Notion's authorization endpoint takes no scope parameter at all, and
+        ;; requiring a descriptor to invent them would make it claim a
+        ;; narrowing it cannot perform.
+        scoped? (m/scoped? descriptor)]
     (when (str/blank? (str id))
       (conj! ps (problem :error :connector/no-id nil "connector has no :connector/id")))
     (when (and (seq (str id)) (not (re-matches #"[a-z0-9]+(\.[a-z0-9-]+)+" (str id))))
@@ -106,13 +115,21 @@
             p (validate-tool id k t)]
       (conj! ps p))
     ;; Per-tool scopes only mean anything when the profile actually has scopes.
-    (when oauth?
+    (if scoped?
       (doseq [t (m/tools descriptor)]
         (when (empty? (:connector/scopes t))
           (conj! ps (problem :error :tool/no-scopes id
                              (str id " tool " (:connector/name t)
                                   " declares no scopes; consent computed from the"
-                                  " enabled set would not request anything for it"))))))
+                                  " enabled set would not request anything for it")))))
+      ;; And the reverse: a scope on a provider that has none is a claim the
+      ;; consent screen would print and the provider would ignore.
+      (doseq [t (m/tools descriptor)]
+        (when (seq (:connector/scopes t))
+          (conj! ps (problem :error :tool/unexpected-scopes id
+                             (str id " tool " (:connector/name t)
+                                  " declares scopes, but this provider has no"
+                                  " scope mechanism"))))))
     (persistent! ps)))
 
 (defn errors [descriptor]

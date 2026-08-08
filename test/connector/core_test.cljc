@@ -275,6 +275,94 @@
                                          :tokens (ports/static-tokens {})})]
     (is (= :connector/unknown-tool (:connector/code result)))))
 
+;; --- providers without a scope mechanism ---
+
+(def scopeless-auth
+  (m/oauth2 {:authorization-endpoint "https://api.notion.com/v1/oauth/authorize"
+             :token-endpoint "https://api.notion.com/v1/oauth/token"
+             :client-id-env "NOTION_CLIENT_ID"
+             :client-secret-env "NOTION_CLIENT_SECRET"
+             :pkce? false
+             :scopes? false
+             :client-auth :basic}))
+
+(defn- scopeless-descriptor []
+  (-> (m/connector "com.example.scopeless" "Scopeless"
+                   {:origin-domain "example.com" :auth scopeless-auth})
+      (m/add-tool "scopeless_read" {:effect :read})))
+
+(deftest a-provider-with-no-scopes-declares-that-instead-of-inventing-some
+  (is (false? (m/scoped? (scopeless-descriptor))))
+  (is (empty? (v/errors (scopeless-descriptor)))
+      "no per-tool scopes is correct here, not an omission")
+  (testing "and declaring scopes anyway is the error"
+    (let [d (m/add-tool (scopeless-descriptor) "scopeless_read"
+                        {:effect :read :scopes ["invented"]})]
+      (is (some #(= :tool/unexpected-scopes (:connector/code %)) (v/errors d)))))
+  (testing "the authorization URL omits `scope` entirely"
+    (let [url (auth/authorization-url (scopeless-descriptor)
+                                      {:client-id "cid" :redirect-uri "https://app/cb"
+                                       :state "st" :scopes []})]
+      (is (not (str/includes? url "scope="))
+          "an empty scope= would claim a narrowing this provider cannot do"))))
+
+(deftest client-secret-basic-goes-in-the-header-not-the-body
+  (let [req (auth/token-exchange-request
+             (scopeless-descriptor)
+             {:client-id "cid" :client-secret "sec" :code "abc"
+              :redirect-uri "https://app/cb"})]
+    (is (= "Basic Y2lkOnNlYw=="
+           (get-in req [:connector.http/headers "authorization"])))
+    (is (not (str/includes? (:connector.http/body req) "client_secret"))
+        "sending it both ways is not belt-and-braces; some providers reject it"))
+  (testing "the default stays client_secret_post"
+    (let [req (auth/token-exchange-request
+               (calendar-descriptor)
+               {:client-id "cid" :client-secret "sec" :code "abc"
+                :redirect-uri "https://app/cb" :code-verifier "v"})]
+      (is (nil? (get-in req [:connector.http/headers "authorization"])))
+      (is (str/includes? (:connector.http/body req) "client_secret=sec")))))
+
+;; --- webhooks, where the URL is the credential ---
+
+(defn- webhook-provider []
+  (p/provider
+   (-> (m/connector "com.example.hook" "Hook"
+                    {:origin-domain "example.com"
+                     :auth (m/url-credential "HOOK_URL")})
+       (m/add-tool "hook_post" {:effect :write
+                                :input-schema {:type "object"
+                                               :properties {"text" {:type "string"}}
+                                               :required ["text"]}}))
+   {:request (fn [_ args]
+               {:connector.http/method :post
+                :connector.http/url-from-credential true
+                :connector.http/headers {"content-type" "application/json"}
+                :connector.http/body {"text" (get args "text")}})}))
+
+(deftest a-webhook-url-comes-from-the-credential-not-the-descriptor
+  (let [[seen http] (recording-http {:connector.http/status 200 :connector.http/body {}})
+        r (reg/registry [(webhook-provider)])]
+    (testing "the descriptor holds no URL — a catalog can print it safely"
+      (is (nil? (:connector/base-url (p/descriptor (webhook-provider)))))
+      (is (nil? (:connector.http/url (invoke/request-for r "hook_post" {"text" "hi"})))))
+    (invoke/call r "hook_post" {"text" "hi"}
+                 {:http http
+                  :tokens (ports/static-tokens {"com.example.hook" "https://chat.example/hook?key=k"})})
+    (is (= "https://chat.example/hook?key=k" (:connector.http/url @seen)))
+    (is (nil? (get-in @seen [:connector.http/headers "authorization"]))
+        "there is no header to put it in; sending one the provider ignores is noise")
+    (is (nil? (:connector.http/url-from-credential @seen)))))
+
+(deftest a-webhook-without-its-url-refuses-before-sending
+  (let [sent (atom false)
+        http (ports/http-fn (fn [_] (reset! sent true) {:connector.http/status 200}))
+        r (reg/registry [(webhook-provider)])
+        result (invoke/call r "hook_post" {"text" "hi"}
+                            {:http http :tokens (ports/static-tokens {})})]
+    (is (= :connector/not-connected (:connector/code result)))
+    (is (false? @sent))))
+
 (deftest an-invalid-descriptor-fails-where-it-is-written
   (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
                (p/provider (-> (m/connector "com.example.bad" "Bad" {:auth google-auth})
