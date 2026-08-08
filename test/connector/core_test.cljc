@@ -1,0 +1,282 @@
+(ns connector.core-test
+  (:require [clojure.string :as str]
+            [clojure.test :refer [deftest is testing]]
+            [connector.auth :as auth]
+            [connector.consent :as consent]
+            [connector.invoke :as invoke]
+            [connector.model :as m]
+            [connector.ports :as ports]
+            [connector.provider :as p]
+            [connector.registry :as reg]
+            [connector.validate :as v]))
+
+;; --- fixtures ---
+
+(def google-auth
+  (m/oauth2 {:authorization-endpoint "https://accounts.google.com/o/oauth2/v2/auth"
+             :token-endpoint "https://oauth2.googleapis.com/token"
+             :client-id-env "GOOGLE_CLIENT_ID"
+             :client-secret-env "GOOGLE_CLIENT_SECRET"
+             :pkce? true
+             :base-scopes ["openid" "email"]
+             :extra {"access_type" "offline"}}))
+
+(defn calendar-descriptor []
+  (-> (m/connector "com.google.calendar" "Google Calendar"
+                   {:origin-domain "google.com"
+                    :base-url "https://www.googleapis.com"
+                    :auth google-auth})
+      (m/add-tool "google_calendar_list_events"
+                  {:description "List events"
+                   :effect :read
+                   :scopes ["https://www.googleapis.com/auth/calendar.readonly"]
+                   :input-schema {:type "object"
+                                  :properties {"calendarId" {:type "string"}}
+                                  :required ["calendarId"]}})
+      (m/add-tool "google_calendar_create_event"
+                  {:description "Create an event"
+                   :effect :write
+                   :scopes ["https://www.googleapis.com/auth/calendar.events"]
+                   :input-schema {:type "object"
+                                  :properties {"calendarId" {:type "string"}}
+                                  :required ["calendarId"]}})))
+
+(defn gmail-descriptor []
+  (-> (m/connector "com.google.gmail" "Gmail"
+                   {:origin-domain "google.com"
+                    :base-url "https://gmail.googleapis.com"
+                    :auth google-auth})
+      (m/add-tool "gmail_send_message"
+                  {:description "Send a message"
+                   :effect :write
+                   :scopes ["https://www.googleapis.com/auth/gmail.send"]
+                   :input-schema {:type "object"
+                                  :properties {"raw" {:type "string"}}
+                                  :required ["raw"]}})))
+
+(defn- calendar-provider []
+  (p/provider (calendar-descriptor)
+              {:request (fn [tool-name args]
+                          {:connector.http/method (if (= tool-name "google_calendar_create_event")
+                                                    :post :get)
+                           :connector.http/url (str "https://www.googleapis.com/calendar/v3/calendars/"
+                                                    (get args "calendarId") "/events")
+                           :connector.http/headers {"accept" "application/json"}})
+               :normalize (fn [_ response]
+                            {:events (get (:connector.http/body response) "items")})}))
+
+(defn- gmail-provider []
+  (p/provider (gmail-descriptor)
+              {:request (fn [_ args]
+                          {:connector.http/method :post
+                           :connector.http/url "https://gmail.googleapis.com/gmail/v1/users/me/messages/send"
+                           :connector.http/body {"raw" (get args "raw")}})}))
+
+;; --- model ---
+
+(deftest scopes-are-per-tool
+  (testing "enabling one tool asks for that tool's scope, not the connector's"
+    (let [d (calendar-descriptor)]
+      (is (= ["email" "https://www.googleapis.com/auth/calendar.readonly" "openid"]
+             (m/scopes-for d ["google_calendar_list_events"]))
+          "base scopes plus only the enabled tool's scope, sorted")
+      (is (= 4 (count (m/scopes d)))
+          "the everything-enabled figure keeps both tool scopes"))))
+
+(deftest read-only-drops-write-tools-and-their-scopes
+  (let [d (m/read-only (calendar-descriptor))]
+    (is (= ["google_calendar_list_events"] (m/tool-names d)))
+    (is (not (some #(str/includes? % "calendar.events") (m/scopes d)))
+        "the write scope is gone because the tool that needed it is")))
+
+;; --- validate ---
+
+(deftest validation-catches-the-silent-mistakes
+  (testing "a tool with no scopes is an error, not a warning"
+    (let [d (-> (m/connector "com.example.thing" "Thing"
+                             {:origin-domain "example.com" :auth google-auth})
+                (m/add-tool "thing_read" {:effect :read}))]
+      (is (some #(= :tool/no-scopes (:connector/code %)) (v/errors d)))))
+  (testing "a tool with no declared effect is an error"
+    (let [d (-> (m/connector "com.example.thing" "Thing"
+                             {:origin-domain "example.com" :auth google-auth})
+                (m/add-tool "thing_read" {:scopes ["s"]}))]
+      (is (some #(= :tool/no-effect (:connector/code %)) (v/errors d)))))
+  (testing "a non-https oauth endpoint is an error"
+    (let [d (m/connector "com.example.thing" "Thing"
+                         {:origin-domain "example.com"
+                          :auth (m/oauth2 {:authorization-endpoint "http://example.com/a"
+                                           :token-endpoint "https://example.com/t"
+                                           :pkce? false})})]
+      (is (some #(= :auth/insecure-endpoint (:connector/code %)) (v/errors d)))))
+  (testing "a valid descriptor has no errors"
+    (is (v/valid? (calendar-descriptor)))))
+
+(deftest origin-plane-name-is-derived-not-guessed
+  (is (= "com-google" (v/origin-prefix "google.com")))
+  (is (= "com-microsoft" (v/origin-prefix "microsoft.com")))
+  (is (= "jp-go-digital" (v/origin-prefix "digital.go.jp")))
+  (is (true? (v/name-conformant? (calendar-descriptor) "com-google-calendar")))
+  (is (false? (v/name-conformant? (calendar-descriptor) "google-calendar")))
+  (testing "no recorded domain is UNVERIFIED, not a pass"
+    (is (nil? (v/name-conformant? (m/connector "com.x" "X") "anything")))))
+
+;; --- auth ---
+
+(deftest authorization-url-is-deterministic-and-encoded
+  (let [url (auth/authorization-url
+             (calendar-descriptor)
+             {:client-id "cid" :redirect-uri "https://app.example/cb"
+              :state "st" :code-challenge "chal"
+              :scopes ["openid" "https://www.googleapis.com/auth/calendar.readonly"]})]
+    (is (str/starts-with? url "https://accounts.google.com/o/oauth2/v2/auth?"))
+    (is (= url (auth/authorization-url
+                (calendar-descriptor)
+                {:client-id "cid" :redirect-uri "https://app.example/cb"
+                 :state "st" :code-challenge "chal"
+                 :scopes ["https://www.googleapis.com/auth/calendar.readonly" "openid"]}))
+        "scope order in equals scope order out; the URL does not reshuffle")
+    (is (str/includes? url "code_challenge=chal"))
+    (is (str/includes? url "code_challenge_method=S256"))
+    (is (str/includes? url "access_type=offline") "profile extras are carried")
+    (is (str/includes? url "redirect_uri=https%3A%2F%2Fapp.example%2Fcb"))
+    (is (str/includes? url "scope=https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fcalendar.readonly%20openid")
+        "space-separated scopes are %20, not '+'")))
+
+(deftest pkce-is-declared-and-enforced
+  (testing "a provider that verifies PKCE refuses to build a URL without a challenge"
+    (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+                 (auth/authorization-url (calendar-descriptor)
+                                         {:client-id "cid" :redirect-uri "u"
+                                          :state "s" :scopes ["openid"]}))))
+  (testing "a provider that does not verify PKCE omits the parameters entirely"
+    (let [d (m/connector "com.github" "GitHub"
+                         {:origin-domain "github.com"
+                          :auth (m/oauth2 {:authorization-endpoint "https://github.com/login/oauth/authorize"
+                                           :token-endpoint "https://github.com/login/oauth/access_token"
+                                           :pkce? false})})
+          url (auth/authorization-url d {:client-id "cid" :redirect-uri "u"
+                                         :state "s" :scopes ["repo"]})]
+      (is (not (str/includes? url "code_challenge")))))
+  (testing "verifier shape"
+    (is (auth/verifier-valid? (auth/verifier (range 64))))
+    (is (not (auth/verifier-valid? "short")))))
+
+(deftest token-requests-are-values
+  (let [req (auth/token-exchange-request
+             (calendar-descriptor)
+             {:client-id "cid" :client-secret "sec" :code "abc"
+              :redirect-uri "https://app.example/cb" :code-verifier "ver"})]
+    (is (= :post (:connector.http/method req)))
+    (is (= "https://oauth2.googleapis.com/token" (:connector.http/url req)))
+    (is (str/includes? (:connector.http/body req) "grant_type=authorization_code"))
+    (is (str/includes? (:connector.http/body req) "code_verifier=ver"))
+    (is (str/includes? (:connector.http/body req) "client_secret=sec"))))
+
+;; --- registry ---
+
+(deftest registry-refuses-ambiguous-tool-names
+  (let [clash (p/provider (-> (m/connector "com.other.calendar" "Other"
+                                           {:origin-domain "other.com" :auth google-auth})
+                              (m/add-tool "google_calendar_list_events"
+                                          {:effect :read :scopes ["s"]}))
+                          {:request (fn [_ _] {})})]
+    (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+                 (reg/registry [(calendar-provider) clash])))))
+
+(deftest select-narrows-to-what-is-enabled
+  (let [r (reg/select (reg/registry [(calendar-provider) (gmail-provider)])
+                      #{"com.google.calendar"}
+                      #{"google_calendar_list_events"})]
+    (is (= ["google_calendar_list_events"] (reg/tool-names r)))
+    (is (= 1 (count (reg/descriptors r))))))
+
+(deftest catalog-lists-what-a-directory-shows
+  (let [rows (reg/catalog (reg/registry [(calendar-provider) (gmail-provider)]))]
+    (is (= ["com.google.calendar" "com.google.gmail"] (mapv :connector/id rows)))
+    (is (= :oauth2 (:connector/auth-kind (first rows))))))
+
+;; --- consent ---
+
+(deftest one-grant-per-oauth-client-not-per-connector
+  (let [gs (consent/groups (reg/registry [(calendar-provider) (gmail-provider)]))]
+    (is (= 1 (count gs)) "Calendar and Gmail share one Google OAuth client")
+    (is (= ["com.google.calendar" "com.google.gmail"]
+           (sort (:connector.consent/connectors (first gs)))))))
+
+(deftest consent-asks-only-for-enabled-tools
+  (let [full (reg/registry [(calendar-provider) (gmail-provider)])
+        reading-only (reg/select full #{"com.google.calendar"} #{"google_calendar_list_events"})
+        scopes (:connector.consent/scopes (first (consent/groups reading-only)))]
+    (is (not (some #(str/includes? % "gmail.send") scopes))
+        "enabling a calendar reader must not request permission to send mail")
+    (is (some #(str/includes? % "calendar.readonly") scopes))))
+
+(deftest unconfigured-clients-are-reported-not-dropped
+  (let [[g] (consent/authorization (reg/registry [(calendar-provider)])
+                                   {:client-ids {} :redirect-uri "https://app.example/cb"})]
+    (is (true? (:connector.consent/unconfigured g)))
+    (is (nil? (:connector.consent/url g))))
+  (let [[g] (consent/authorization (reg/registry [(calendar-provider)])
+                                   {:client-ids {"GOOGLE_CLIENT_ID" "cid"}
+                                    :redirect-uri "https://app.example/cb"
+                                    :state-fn (constantly "st")
+                                    :code-challenge-fn (constantly "chal")})]
+    (is (str/includes? (:connector.consent/url g) "client_id=cid"))))
+
+(deftest grant-summary-is-readable-per-tool
+  (let [rows (consent/grant-summary (reg/registry [(calendar-provider)]))]
+    (is (= 2 (count rows)))
+    (is (= #{:read :write} (set (map :connector/effect rows))))))
+
+;; --- invoke ---
+
+(defn- recording-http [response]
+  (let [seen (atom nil)]
+    [seen (ports/http-fn (fn [req] (reset! seen req) response))]))
+
+(deftest a-connector-never-sees-the-credential
+  (let [r (reg/registry [(calendar-provider)])
+        req (invoke/request-for r "google_calendar_list_events" {"calendarId" "primary"})]
+    (is (nil? (get-in req [:connector.http/headers "authorization"]))
+        "the connector's own request has no credential in it")))
+
+(deftest invoke-attaches-the-token-and-normalizes
+  (let [[seen http] (recording-http {:connector.http/status 200
+                                     :connector.http/body {"items" [{"id" "e1"}]}})
+        r (reg/registry [(calendar-provider)])
+        result (invoke/call r "google_calendar_list_events" {"calendarId" "primary"}
+                            {:http http
+                             :tokens (ports/static-tokens {"com.google.calendar" "tok"})})]
+    (is (= "Bearer tok" (get-in @seen [:connector.http/headers "authorization"])))
+    (is (= {:events [{"id" "e1"}]} result))))
+
+(deftest invoke-refuses-without-a-token
+  (let [[_ http] (recording-http {:connector.http/status 200 :connector.http/body {}})
+        r (reg/registry [(calendar-provider)])
+        result (invoke/call r "google_calendar_list_events" {"calendarId" "primary"}
+                            {:http http :tokens (ports/static-tokens {})})]
+    (is (true? (:connector/error result)))
+    (is (= :connector/not-connected (:connector/code result)))))
+
+(deftest an-http-error-is-not-normalized-into-an-answer
+  (let [[_ http] (recording-http {:connector.http/status 403
+                                  :connector.http/body {"error" "insufficient scope"}})
+        r (reg/registry [(calendar-provider)])
+        result (invoke/call r "google_calendar_list_events" {"calendarId" "primary"}
+                            {:http http :tokens (ports/static-tokens {"com.google.calendar" "tok"})})]
+    (is (true? (:connector/error result)))
+    (is (= 403 (:connector.http/status result)))
+    (is (nil? (:events result)) "the normalizer never ran")))
+
+(deftest unknown-tool-is-a-value
+  (let [r (reg/registry [(calendar-provider)])
+        result (invoke/call r "nope" {} {:http (ports/http-fn (fn [_] {}))
+                                         :tokens (ports/static-tokens {})})]
+    (is (= :connector/unknown-tool (:connector/code result)))))
+
+(deftest an-invalid-descriptor-fails-where-it-is-written
+  (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+               (p/provider (-> (m/connector "com.example.bad" "Bad" {:auth google-auth})
+                               (m/add-tool "bad_tool" {:effect :read}))
+                           {:request (fn [_ _] {})}))))

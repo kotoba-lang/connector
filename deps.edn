@@ -1,0 +1,17 @@
+{:paths ["src"]
+ ;; org-anthropic-mcp is the only runtime dependency and only `connector.mcp`
+ ;; uses it. It is a sibling kernel in this org rather than a third-party
+ ;; library, and the alternative — re-deriving its `:mcp/*` manifest shape here
+ ;; — is how one contract acquires two spellings.
+ :deps {io.github.kotoba-lang/org-anthropic-mcp
+        {:git/url "https://github.com/kotoba-lang/org-anthropic-mcp"
+         :git/sha "9b343e64139763d66c2a3969669bc03f73b32a46"}}
+ :aliases
+ {:test {:extra-paths ["test"]
+         :extra-deps {io.github.cognitect-labs/test-runner
+                      {:git/tag "v0.5.1" :git/sha "dfb30dd"}}
+         :main-opts ["-m" "cognitect.test-runner"]
+         :exec-fn cognitect.test-runner.api/test}
+  :lint {:replace-deps {clj-kondo/clj-kondo {:mvn/version "2024.11.14"}}
+         :main-opts ["-m" "clj-kondo.main" "--lint" "src" "test"
+                     "--fail-level" "error"]}}}
