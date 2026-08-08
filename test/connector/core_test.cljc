@@ -191,6 +191,18 @@
     (is (= ["google_calendar_list_events"] (reg/tool-names r)))
     (is (= 1 (count (reg/descriptors r))))))
 
+(deftest an-empty-enabled-set-means-none-not-all
+  (testing "nil is 'no tool filter'; an empty collection is 'no tools'.
+            Collapsing the two made disabling everything enable everything."
+    (let [full (reg/registry [(calendar-provider) (gmail-provider)])]
+      (is (= 3 (count (reg/tool-names (reg/select full #{"com.google.calendar"
+                                                         "com.google.gmail"} nil))))
+          "nil keeps every tool of the selected connectors")
+      (is (empty? (reg/tool-names (reg/select full #{"com.google.calendar"
+                                                     "com.google.gmail"} #{})))
+          "an operator who turned everything off gets nothing")
+      (is (empty? (reg/tool-names (reg/select full #{"com.google.calendar"} [])))))))
+
 (deftest catalog-lists-what-a-directory-shows
   (let [rows (reg/catalog (reg/registry [(calendar-provider) (gmail-provider)]))]
     (is (= ["com.google.calendar" "com.google.gmail"] (mapv :connector/id rows)))

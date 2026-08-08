@@ -76,7 +76,12 @@
   ([reg ids] (select reg ids nil))
   ([reg ids enabled-tools]
    (let [wanted (set ids)
-         keep-tool? (if (seq enabled-tools) (set enabled-tools) (constantly true))]
+         ;; nil means 'no tool filter'; an EMPTY collection means 'no tools'.
+         ;; Collapsing the two with `seq` made disabling everything enable
+         ;; everything — the exact silent-widening this plane exists to stop.
+         ;; Found by a host test asserting that an explicitly empty
+         ;; configuration yields nothing.
+         keep-tool? (if (nil? enabled-tools) (constantly true) (set enabled-tools))]
      (registry
       (for [pr (providers reg)
             :when (wanted (p/id pr))
