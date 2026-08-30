@@ -7,5 +7,18 @@
 ;; it is a declared dependency in deps.edn, not an optional extra.
 (require '[clojure.test :as t] 'connector.core-test 'connector.mcp-test)
 
-(let [{:keys [fail error]} (t/run-tests 'connector.core-test 'connector.mcp-test)]
-  (js/process.exit (if (pos? (+ fail error)) 1 0)))
+;; The exit code comes from the :end-run-tests report hook, NOT from the return
+;; value of `run-tests`. Under nbb that value is nil, so the previous spelling
+;;
+;;   (let [{:keys [fail error]} (t/run-tests 'ns)]
+;;     (js/process.exit (if (pos? (+ fail error)) 1 0)))
+;;
+;; destructured nil twice, added them to 0, and exited **0 with failures on the
+;; screen** -- a red suite and a green suite returned the same value, which
+;; makes every other check in this repository decorative. Measured 2026-08-30
+;; against this repository's own suite before the change: failures, exit 0.
+;; ADR-2608301500.
+(defmethod t/report [:cljs.test/default :end-run-tests] [m]
+  (js/process.exit (if (t/successful? m) 0 1)))
+
+(t/run-tests 'connector.core-test 'connector.mcp-test)
