@@ -3,7 +3,12 @@
  ;; uses it. It is a sibling kernel in this org rather than a third-party
  ;; library, and the alternative — re-deriving its `:mcp/*` manifest shape here
  ;; — is how one contract acquires two spellings.
- :deps {io.github.kotoba-lang/org-anthropic-mcp
+ :deps {
+        ;; kotoba.lang.text, not clojure.string. Pinned as an explicit floor:
+        ;; tools.deps takes the NEWEST sha it is shown, so without a floor here
+        ;; this repo silently rides whatever a sibling happens to name.
+        io.github.kotoba-lang/text {:git/sha "73bdb13ae7a3d004b44bca08be03a3191157a38f"}
+       io.github.kotoba-lang/org-anthropic-mcp
         {:git/url "https://github.com/kotoba-lang/org-anthropic-mcp"
          :git/sha "9b343e64139763d66c2a3969669bc03f73b32a46"}}
  :aliases

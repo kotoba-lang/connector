@@ -2,7 +2,7 @@
   "Kept apart from core-test because it is the only namespace here that needs
   org-anthropic-mcp on the classpath. A run without that sibling should fail on
   this suite alone rather than take the whole library with it."
-  (:require [clojure.string :as str]
+  (:require [kotoba.lang.text :as str]
             [clojure.test :refer [deftest is testing]]
             [connector.core-test :as fixtures]
             [connector.mcp :as cmcp]
