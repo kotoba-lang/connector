@@ -17,7 +17,7 @@
   Grouping by the CLIENT rather than by the provider name is deliberate: two
   deployments of the same service under different OAuth clients must not share
   a grant, and nothing here can tell them apart by name."
-  (:require [clojure.string :as str]
+  (:require [kotoba.lang.text :as str]
             [connector.auth :as auth]
             [connector.model :as m]
             [connector.provider :as p]

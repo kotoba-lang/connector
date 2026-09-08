@@ -11,7 +11,7 @@
   of the same name is not something to silently pick a winner for — the tool
   names are what a model sees, and a name that means different things in
   different deployments is worse than a load-time failure."
-  (:require [clojure.string :as str]
+  (:require [kotoba.lang.text :as str]
             [connector.model :as m]
             [connector.provider :as p]))
 

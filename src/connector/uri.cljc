@@ -9,7 +9,7 @@
   Neither primitive is RFC 3986 on its own. Java's URLEncoder is form-encoding
   (space becomes '+', '*' and '~' differ) and encodeURIComponent leaves !'()*
   alone. The rewrites below settle both on the same output."
-  (:require [clojure.string :as str]))
+  (:require [kotoba.lang.text :as str]))
 
 (defn encode
   "Percent-encode one component (a path segment or a parameter value)."
