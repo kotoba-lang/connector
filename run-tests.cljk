@@ -1,7 +1,7 @@
-#!/usr/bin/env nbb
+#!/usr/bin/env kbb
 ;; nbb test runner.
 ;;
-;;   nbb --classpath "src:test:../org-anthropic-mcp/src" run-tests.cljk
+;;   kbb --backend sci --classpath "src:test:../org-anthropic-mcp/src" run-tests.cljk
 ;;
 ;; org-anthropic-mcp is on the classpath because `connector.mcp` requires it —
 ;; it is a declared dependency in deps.edn, not an optional extra.
