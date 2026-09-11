@@ -132,7 +132,7 @@ cassette and no recorded traffic:
 ## Tests
 
 ```sh
-nbb --classpath "src:test:../org-anthropic-mcp/src" run-tests.cljs   # 22 tests, 59 assertions
+nbb --classpath "src:test:../org-anthropic-mcp/src" run-tests.cljk   # 22 tests, 59 assertions
 clojure -M:test
 ```
 
